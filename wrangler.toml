@@ -8,14 +8,9 @@ binding = "DB"
 database_name = "mediagrab-db"
 database_id = "abefadd4-62c2-4301-a79c-8da8b049c09c"
 
-{
-  // ...
-  "observability": {
-    "logs": {
-      "enabled": true,
-      "invocation_logs": true,
-      "persist": true
-    }
-  },
-  // ...
-}
+# ...
+[observability.logs]
+enabled = true
+invocation_logs = true
+persist = true
+# ...
