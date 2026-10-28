@@ -154,6 +154,41 @@ async function recordDownload(
 }
 
 
+async function allowed(env, userId) {
+  const now = Math.floor(Date.now() / 1000);
+  const cutoff = now - WINDOW_SECONDS;
+
+  try {
+    // Hapus catatan rate limit yang sudah melewati jendela 10 menit.
+    await env.DB.prepare(
+      "DELETE FROM rate_limits WHERE created_at <= ?"
+    ).bind(cutoff).run();
+
+    // Hitung permintaan pengguna dalam 10 menit terakhir.
+    const result = await env.DB.prepare(`
+      SELECT COUNT(*) AS total
+      FROM rate_limits
+      WHERE user_id = ? AND created_at > ?
+    `).bind(String(userId), cutoff).first();
+
+    if ((result?.total ?? 0) >= MAX_REQUESTS) {
+      return false;
+    }
+
+    // Catat permintaan baru.
+    await env.DB.prepare(`
+      INSERT INTO rate_limits (user_id, created_at)
+      VALUES (?, ?)
+    `).bind(String(userId), now).run();
+
+    return true;
+  } catch (error) {
+    console.error("Rate limit check failed:", String(error));
+    throw error;
+  }
+}
+
+
 async function resolveMedia(input) {
   let current = await safeUrl(input);
 
