@@ -77,9 +77,14 @@ async function handleUpdate(update, env) {
       "⏳ Limit reached. Please try again in a few minutes.");
   }
 
+
   const source = match[0].replace(/[.,!?]+$/, "");
+  let mediaType = "unknown";
+  let sourceHost = "unknown";
 
   try {
+    sourceHost = new URL(source).hostname;
+
     await sendAction(env, chatId, "upload_document");
     const media = await resolveMedia(source);
 
@@ -87,45 +92,67 @@ async function handleUpdate(update, env) {
       throw new Error("No supported media found on this link.");
     }
 
+    mediaType = media.type;
+
     const filename = `mediagrab-${Date.now()}.${extension(media.type)}`;
     const form = new FormData();
 
     form.set("chat_id", String(chatId));
-    form.set("caption",
-      `✅ Download ready\nSource: ${new URL(source).hostname}`);
-    form.set("document",
-      new File([media.bytes], filename, { type: media.type }));
+    form.set(
+      "caption",
+      `✅ Download ready\nSource: ${sourceHost}`
+    );
+    form.set(
+      "document",
+      new File([media.bytes], filename, { type: media.type })
+    );
 
     const result = await telegram(env, "sendDocument", form);
-    if (!result.ok) throw new Error(result.description || "Telegram send failed.");
+    if (!result.ok) {
+      throw new Error(result.description || "Telegram send failed.");
+    }
+
+    await recordDownload(
+      env, userId, sourceHost, mediaType, "success", "Download completed"
+    );
   } catch (error) {
-    await sendMessage(env, chatId,
+    await recordDownload(
+      env, userId, sourceHost, mediaType, "failed", cleanError(error)
+    );
+
+    await sendMessage(
+      env,
+      chatId,
       `❌ Download failed: ${cleanError(error)}\n\n` +
-      "Try a direct public media link. Login-protected pages, " +
-      "anti-bot pages, and segmented streams may not work.");
+        "Try a direct public media link. Login-protected pages, " +
+        "anti-bot pages, and segmented streams may not work."
+    );
   }
 }
 
-async function allowed(env, userId) {
-  const now = Math.floor(Date.now() / 1000);
-  const cutoff = now - WINDOW_SECONDS;
 
-  await env.DB.prepare(
-    "DELETE FROM rate_limits WHERE created_at < ?"
-  ).bind(cutoff).run();
 
-  const row = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM rate_limits WHERE user_id = ? AND created_at >= ?"
-  ).bind(userId, cutoff).first();
-
-  if ((row?.n || 0) >= MAX_REQUESTS) return false;
-
-  await env.DB.prepare(
-    "INSERT INTO rate_limits (user_id, created_at) VALUES (?, ?)"
-  ).bind(userId, now).run();
-
-  return true;
+async function recordDownload(
+  env, userId, sourceHost, mediaType, status, details
+) {
+  try {
+    await env.DB.prepare(`
+      INSERT INTO download_events
+        (telegram_user_id, source_host, media_type, status, details)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(
+      String(userId),
+      String(sourceHost).slice(0, 253),
+      String(mediaType).slice(0, 100),
+      status === "success" ? "success" : "failed",
+      String(details).slice(0, 250)
+    ).run();
+  } catch (error) {
+    // Statistik gagal dicatat tidak boleh mematikan bot.
+    console.error("Failed to record download event:", String(error));
+  }
 }
+
 
 async function resolveMedia(input) {
   let current = await safeUrl(input);
