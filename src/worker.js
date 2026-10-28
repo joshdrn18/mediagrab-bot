@@ -18,6 +18,17 @@ export default {
       return new Response("MediaGrab Bot is running.");
     }
 
+    if (url.pathname === "/health") {
+      return new Response(JSON.stringify({
+        ok: true,
+        service: "MediaGrab Bot",
+        health: "online",
+        timestamp: new Date().toISOString()
+      }), {
+        headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+      });
+    }
+
     if (url.pathname !== `/webhook/${env.WEBHOOK_SECRET}`) {
       return new Response("Not found", { status: 404 });
     }
@@ -50,6 +61,15 @@ async function handleUpdate(update, env) {
   const chatId = msg.chat.id;
   const userId = String(msg.from?.id || chatId);
   const text = (msg.text || msg.caption || "").trim();
+
+  // Monitoring must never interrupt the existing Telegram bot workflow.
+  await reportTelemetry(env, {
+    event: "telegram_update_received",
+    severity: "info",
+    message: "Telegram update received",
+    group_id: (msg.chat.type === "group" || msg.chat.type === "supergroup") ? String(chatId) : null,
+    metadata: { update_type: msg.text ? "text" : msg.caption ? "caption" : "other" }
+  });
 
   if (text === "/start" || text === "/help") {
     return sendMessage(env, chatId,
@@ -115,10 +135,26 @@ async function handleUpdate(update, env) {
     await recordDownload(
       env, userId, sourceHost, mediaType, "success", "Download completed"
     );
+
+    await reportTelemetry(env, {
+      event: "download_completed",
+      severity: "info",
+      message: "Media download completed successfully",
+      group_id: (msg.chat.type === "group" || msg.chat.type === "supergroup") ? String(chatId) : null,
+      metadata: { source_host: sourceHost, media_type: mediaType }
+    });
   } catch (error) {
     await recordDownload(
       env, userId, sourceHost, mediaType, "failed", cleanError(error)
     );
+
+    await reportTelemetry(env, {
+      event: "download_failed",
+      severity: "warning",
+      message: cleanError(error),
+      group_id: (msg.chat.type === "group" || msg.chat.type === "supergroup") ? String(chatId) : null,
+      metadata: { source_host: sourceHost, media_type: mediaType }
+    });
 
     await sendMessage(
       env,
@@ -131,6 +167,32 @@ async function handleUpdate(update, env) {
 }
 
 
+
+async function reportTelemetry(env, payload) {
+  if (!env.MONITOR_TOKEN) return;
+
+  try {
+    const response = await fetch(
+      "https://telegram-bot-control-center.joshdrn18.workers.dev/api/telemetry",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${env.MONITOR_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ source: "mediagrab-bot", ...payload }),
+        signal: AbortSignal.timeout(4000)
+      }
+    );
+
+    if (!response.ok) {
+      console.error("Monitoring telemetry rejected:", response.status);
+    }
+  } catch (error) {
+    // Monitoring failures must not interrupt downloads or Telegram responses.
+    console.error("Monitoring telemetry failed:", String(error));
+  }
+}
 
 async function recordDownload(
   env, userId, sourceHost, mediaType, status, details
